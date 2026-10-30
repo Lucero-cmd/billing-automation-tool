@@ -54,9 +54,24 @@ def resource_path(filename):
 # Logo (inside EXE)
 LOGO_PATH = resource_path("logo.png")
 
-# Settings file — stores counters, last save location, and history
+# Settings file — counters, save location, history (up to 5000), course library
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), "fat_generator_settings.json")
-MAX_HISTORY = 50
+MAX_HISTORY   = 5000
+WARN_HISTORY  = 4500   # show a warning badge when approaching the cap
+
+# Default course library (price inclusive of VAT)
+DEFAULT_COURSES = [
+    {"name": "Emergency First Aid at Work",                                                           "price_inc": 108.00, "vat_rate": 20},
+    {"name": "Paediatric 12 Hour Infant / Child First Aid Level 3 (VTQ) – Classroom Blended Part 2", "price_inc": 108.00, "vat_rate": 20},
+    {"name": "BLS, AED & Anaphylaxis for Adults & Children - FAA Level 3",                           "price_inc":  72.00, "vat_rate": 20},
+    {"name": "Immediate Life Support (ILS) Level 3 (VTQ) for Healthcare Professionals",              "price_inc": 118.80, "vat_rate": 20},
+    {"name": "Paediatric Immediate Life Support (PILS) Level 3 (VTQ)",                               "price_inc": 118.80, "vat_rate": 20},
+    {"name": "Basic Life Support and AED for Healthcare Professionals Level 2 (VTQ)",                "price_inc":  72.00, "vat_rate": 20},
+    {"name": "CPR/BLS, AED and Anaphylaxis Level 2 (VTQ)",                                           "price_inc":  72.00, "vat_rate": 20},
+    {"name": "Dental Basic Life Support (BLS) and AED Level 2 (VTQ)",                                "price_inc":  72.00, "vat_rate": 20},
+    {"name": "Dental Immediate Life Support (ILS) Level 3 (VTQ)",                                    "price_inc": 118.80, "vat_rate": 20},
+    {"name": "First Aid at Work",                                                                     "price_inc": 216.00, "vat_rate": 20},
+]
 
 
 def _load_settings() -> dict:
@@ -71,19 +86,24 @@ def _load_settings() -> dict:
 
 
 def _save_settings(settings: dict):
+    """Write to a temp file first, then swap it in, so a crash never corrupts history."""
     import json
+    tmp_path = SETTINGS_FILE + ".tmp"
     try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=2)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, SETTINGS_FILE)
     except Exception:
-        pass
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def _parse_date_from_field(date_str: str):
-    formats = [
-        "%d %B %Y", "%#d %B %Y", "%-d %B %Y",
-        "%d %b %Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y",
-    ]
+    formats = ["%d %B %Y", "%#d %B %Y", "%-d %B %Y",
+               "%d %b %Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"]
     for fmt in formats:
         try:
             return datetime.strptime(date_str.strip(), fmt)
@@ -130,15 +150,138 @@ def _save_location(path: str):
 
 
 def _save_history_entry(entry: dict):
+    """Prepend entry; keep newest MAX_HISTORY, never silently drop — warn instead."""
     s = _load_settings()
     history = s.get("history", [])
     history.insert(0, entry)
-    s["history"] = history[:MAX_HISTORY]
+    if len(history) > MAX_HISTORY:
+        history = history[:MAX_HISTORY]   # trim oldest
+    s["history"] = history
     _save_settings(s)
 
 
 def _load_history() -> list:
     return _load_settings().get("history", [])
+
+
+BACKUP_DIR  = os.path.join(os.path.expanduser("~"), "fat_generator_backups")
+BACKUP_KEEP = 30   # number of daily backups to keep
+
+
+def _backup_settings_daily():
+    """Copy the settings/history file once per day before anything changes it."""
+    import shutil
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        target = os.path.join(BACKUP_DIR,
+                              f"fat_generator_settings_{datetime.today().strftime('%Y-%m-%d')}.json")
+        if not os.path.exists(target):
+            shutil.copy2(SETTINGS_FILE, target)
+        backups = sorted(f for f in os.listdir(BACKUP_DIR)
+                         if f.startswith("fat_generator_settings_") and f.endswith(".json"))
+        for old in backups[:-BACKUP_KEEP]:
+            os.remove(os.path.join(BACKUP_DIR, old))
+    except Exception:
+        pass
+
+
+def _pdf_path(out_dir: str, doc_type: str, number: str, client_name: str) -> str:
+    """Build a unique PDF path such as invoice_FT-301026-01_Jane_Smith.pdf.
+    Never returns the path of an existing file, so earlier PDFs are never overwritten."""
+    import re
+    label     = "invoice" if doc_type == "invoice" else "receipt"
+    name_safe = re.sub(r"[^\w\-]", "", client_name.replace(" ", "_")) or "client"
+    base      = f"{label}_{number}_{name_safe}"
+    path      = os.path.join(out_dir, f"{base}.pdf")
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(out_dir, f"{base}_{n}.pdf")
+        n += 1
+    return path
+
+
+def _same_entry(a: dict, b: dict) -> bool:
+    return (a.get("number") == b.get("number")
+            and a.get("doc_type") == b.get("doc_type")
+            and a.get("generated_at") == b.get("generated_at"))
+
+
+def _update_history_entry(target: dict, changes: dict) -> bool:
+    """Apply changes to one stored history entry. Returns True if it was found."""
+    s = _load_settings()
+    history = s.get("history", [])
+    for e in history:
+        if _same_entry(e, target):
+            e.update(changes)
+            s["history"] = history
+            _save_settings(s)
+            return True
+    return False
+
+
+EXPORT_COLUMNS = [
+    ("Type",             lambda e: "Invoice" if e.get("doc_type") == "invoice" else "Receipt"),
+    ("Number",           lambda e: e.get("number", "")),
+    ("Document Date",    lambda e: e.get("date", "")),
+    ("Generated At",     lambda e: e.get("generated_at", "").replace("T", " ")),
+    ("Client Name",      lambda e: e.get("client_name", "")),
+    ("Client Email",     lambda e: e.get("client_email", "")),
+    ("Client Phone",     lambda e: e.get("client_phone", "")),
+    ("Client Address",   lambda e: e.get("client_address", "").replace("\n", ", ")),
+    ("Course",           lambda e: e.get("description", "")),
+    ("Course Date",      lambda e: e.get("course_date", "")),
+    ("Amount Exc. VAT",  lambda e: _money(e.get("amount_exc"))),
+    ("VAT Rate %",       lambda e: e.get("vat_rate", "")),
+    ("VAT Amount",       lambda e: _money(_vat_parts(e)[0])),
+    ("Total Inc. VAT",   lambda e: _money(_vat_parts(e)[1])),
+    ("Status",           lambda e: e.get("status", "")),
+    ("Linked Document",  lambda e: e.get("receipt_number", "") or e.get("from_invoice", "")),
+]
+
+
+def _vat_parts(entry: dict):
+    """Return (vat_amount, total) as floats, or ("", "") if the numbers are unreadable."""
+    try:
+        exc  = float(entry.get("amount_exc", 0))
+        rate = float(entry.get("vat_rate", 20))
+        vat  = exc * rate / 100
+        return vat, exc + vat
+    except (TypeError, ValueError):
+        return "", ""
+
+
+def _money(value) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def export_history_csv(entries: list, out_path: str):
+    """Write history entries to a CSV file that opens cleanly in Excel."""
+    import csv
+    # utf-8-sig adds a BOM so Excel shows £ and accented names correctly
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow([name for name, _ in EXPORT_COLUMNS])
+        for e in entries:
+            writer.writerow([getter(e) for _, getter in EXPORT_COLUMNS])
+
+
+def _load_courses() -> list:
+    s = _load_settings()
+    if "courses" not in s:
+        s["courses"] = DEFAULT_COURSES
+        _save_settings(s)
+    return s.get("courses", DEFAULT_COURSES)
+
+
+def _save_courses(courses: list):
+    s = _load_settings()
+    s["courses"] = courses
+    _save_settings(s)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  PDF BUILDERS
@@ -539,13 +682,13 @@ class App(tk.Tk):
 
         hist_hdr = tk.Frame(hist_outer, bg=self.DARK)
         hist_hdr.pack(fill="x")
-        tk.Label(hist_hdr, text="🕐  Document History",
-                 font=self.FONT_B, bg=self.DARK, fg="white").pack(side="left", padx=12, pady=8)
+        self._hist_count_lbl = tk.Label(hist_hdr, text="🕐  Document History",
+                 font=self.FONT_B, bg=self.DARK, fg="white")
+        self._hist_count_lbl.pack(side="left", padx=12, pady=8)
         tk.Label(hist_hdr,
-                 text="Click a row to reload its details into the form (date will be today's)",
-                 font=self.FONT_SH, bg=self.DARK, fg="#9CA3AF").pack(side="left", padx=(0,8))
+                 text="Double-click a row to reload into the form (date set to today)",
+                 font=self.FONT_SH, bg=self.DARK, fg="#9CA3AF").pack(side="left", padx=(0, 8))
 
-        # Search box
         search_frame = tk.Frame(hist_outer, bg=self.BG)
         search_frame.pack(fill="x", padx=8, pady=(6, 2))
         tk.Label(search_frame, text="Search:", font=self.FONT_SH,
@@ -554,10 +697,20 @@ class App(tk.Tk):
                                      bg=self.INP_BG, fg=self.INP_FG,
                                      relief="flat", bd=0,
                                      highlightthickness=1, highlightbackground=self.BORDER)
-        self._hist_search.pack(side="left", fill="x", expand=True, ipady=5, ipadx=6, padx=(6,0))
+        self._hist_search.pack(side="left", fill="x", expand=True,
+                               ipady=5, ipadx=6, padx=(6, 0))
         self._hist_search.bind("<KeyRelease>", lambda *_: self._refresh_history())
+        tk.Button(search_frame, text="⬇ Export CSV", font=self.FONT_SH,
+                  bg=self.DARK, fg="white", activebackground=self.ACCENT,
+                  activeforeground="white", relief="flat", bd=0,
+                  cursor="hand2", padx=10, pady=4,
+                  command=self._export_history).pack(side="left", padx=(8, 0))
+        tk.Button(search_frame, text="✅ Mark Paid → Receipt", font=self.FONT_SH,
+                  bg=self.SUCCESS, fg="white", activebackground=self.DARK,
+                  activeforeground="white", relief="flat", bd=0,
+                  cursor="hand2", padx=10, pady=4,
+                  command=self._invoice_to_receipt).pack(side="left", padx=(6, 0))
 
-        # Listbox with scrollbar
         lb_frame = tk.Frame(hist_outer, bg=self.BG)
         lb_frame.pack(fill="x", padx=8, pady=(0, 8))
 
@@ -576,8 +729,26 @@ class App(tk.Tk):
         self._hist_lb.bind("<Double-Button-1>", self._load_from_history)
         self._hist_lb.bind("<Return>",          self._load_from_history)
 
-        # Store raw history for filtering
-        self._history_data = []
+        self._hist_menu = tk.Menu(self, tearoff=0)
+        self._hist_menu.add_command(label="✅  Mark Paid → Create Receipt",
+                                    command=self._invoice_to_receipt)
+        self._hist_menu.add_command(label="✏️  Load into Form",
+                                    command=self._load_from_history)
+        def _on_right_click(event):
+            idx = self._hist_lb.nearest(event.y)
+            if idx < 0 or idx >= self._hist_lb.size():
+                return
+            self._hist_lb.selection_clear(0, "end")
+            self._hist_lb.selection_set(idx)
+            self._hist_lb.activate(idx)
+            try:
+                self._hist_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self._hist_menu.grab_release()
+        self._hist_lb.bind("<Button-3>", _on_right_click)   # Windows / Linux
+        self._hist_lb.bind("<Button-2>", _on_right_click)   # macOS
+
+        self._history_filtered = []
         self._refresh_history()
 
         self._divider(parent)
@@ -640,7 +811,6 @@ class App(tk.Tk):
                                relief="flat", bd=0, anchor="w", padx=8, pady=8,
                                highlightthickness=1, highlightbackground=self.BORDER)
         num_display.pack(fill="x", pady=(3, 0))
-        # Refresh preview as user edits date
         self.f_date.bind("<KeyRelease>", self._refresh_doc_number)
         self.f_date.bind("<FocusOut>",   self._refresh_doc_number)
 
@@ -650,10 +820,34 @@ class App(tk.Tk):
         self._section(parent, "🏫  Course Details")
         course_grid = tk.Frame(parent, bg=self.BG)
         course_grid.pack(fill="x", padx=18)
+        course_grid.columnconfigure(0, weight=1)
+        course_grid.columnconfigure(1, weight=1)
 
-        self.f_desc  = self._field(course_grid, "Course Description *", row=0, col=0,
+        # Course picker
+        picker_cell = tk.Frame(course_grid, bg=self.BG)
+        picker_cell.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 6))
+        tk.Label(picker_cell, text="Select from Course Library",
+                 font=self.FONT_SH, bg=self.BG, fg=self.MUTED).pack(anchor="w")
+        picker_row = tk.Frame(picker_cell, bg=self.BG)
+        picker_row.pack(fill="x", pady=(3, 0))
+
+        self._course_var = tk.StringVar(value="— select a course —")
+        self._course_combo = ttk.Combobox(picker_row, textvariable=self._course_var,
+                                          state="readonly", font=self.FONT_SH, width=54)
+        self._course_combo.pack(side="left", fill="x", expand=True, ipady=5)
+        self._style_combo(self._course_combo)
+        self._course_combo.bind("<<ComboboxSelected>>", self._on_course_selected)
+
+        tk.Button(picker_row, text="⚙ Manage Courses",
+                  font=self.FONT_SH, bg=self.BORDER, fg=self.DARK,
+                  relief="flat", bd=0, cursor="hand2", padx=10, pady=6,
+                  command=self._open_course_manager).pack(side="left", padx=(8, 0))
+
+        self._refresh_course_combo()
+
+        self.f_desc  = self._field(course_grid, "Course Description *", row=1, col=0,
                                     multiline=True, colspan=2)
-        self.f_cdate = self._field(course_grid, "Course Date *",         row=1, col=0)
+        self.f_cdate = self._field(course_grid, "Course Date *",         row=2, col=0)
 
         self._divider(parent)
 
@@ -830,48 +1024,201 @@ class App(tk.Tk):
     # ── History helpers ─────────────────────────────────────────────────────
 
     def _refresh_history(self, *_):
-        """Reload listbox from persisted history, filtered by search box."""
-        query = self._hist_search.get().strip().lower() if hasattr(self, "_hist_search") else ""
-        self._history_data = _load_history()
+        query       = self._hist_search.get().strip().lower() if hasattr(self, "_hist_search") else ""
+        all_entries = _load_history()
+        total       = len(all_entries)
+
+        # Update header to show count + warn if near limit
+        if total >= WARN_HISTORY:
+            badge = f"  ⚠️ {total}/{MAX_HISTORY}"
+            self._hist_count_lbl.configure(fg="#FCD34D")
+        else:
+            badge = f"  ({total})"
+            self._hist_count_lbl.configure(fg="white")
+        self._hist_count_lbl.configure(text=f"🕐  Document History{badge}")
 
         filtered = [
-            e for e in self._history_data
+            e for e in all_entries
             if query in e.get("client_name", "").lower()
             or query in e.get("number", "").lower()
             or query in e.get("doc_type", "").lower()
             or query in e.get("description", "").lower()
-        ] if query else self._history_data
+        ] if query else all_entries
 
         self._hist_lb.delete(0, "end")
         for e in filtered:
-            dt   = e.get("doc_type", "?")[0].upper()          # I / R
+            dt   = "INV" if e.get("doc_type") == "invoice" else "REC"
             num  = e.get("number", "—")
             name = e.get("client_name", "—")
-            gen  = e.get("generated_at", "")[:10]             # date only
-            exc  = e.get("amount_exc", "")
+            gen  = e.get("generated_at", "")[:10]
             total_str = ""
             try:
-                exc_f  = float(exc)
-                rate_f = float(e.get("vat_rate", 20))
-                total_str = f"  £{exc_f*(1+rate_f/100):.2f}"
+                total_str = f"  £{float(e.get('amount_exc',0)) * (1 + float(e.get('vat_rate', 20)) / 100):.2f}"
             except Exception:
                 pass
-            label = f"[{dt}] {num:<18} {name:<28} {gen}{total_str}"
+            link = ""
+            if e.get("receipt_number"):
+                link = f"  ✔ Paid → {e['receipt_number']}"
+            elif e.get("from_invoice"):
+                link = f"  (for {e['from_invoice']})"
+            label = f"[{dt}] {num:<18} {name:<26} {gen}{total_str}{link}"
             self._hist_lb.insert("end", label)
-        # store filtered reference so we can look up by index
         self._history_filtered = filtered
 
+    def _export_history(self):
+        """Export all history, or only the rows matching the current search, to CSV."""
+        query   = self._hist_search.get().strip()
+        entries = self._history_filtered if query else _load_history()
+        if not entries:
+            messagebox.showinfo("Nothing to Export", "There are no history records to export.")
+            return
+
+        scope = f"{len(entries)} record(s) matching \"{query}\"" if query else f"all {len(entries)} record(s)"
+        default_name = f"billing_history_{datetime.today().strftime('%Y-%m-%d')}.csv"
+        out_path = filedialog.asksaveasfilename(
+            title=f"Export {scope}",
+            initialdir=self._out_dir.get() if os.path.isdir(self._out_dir.get()) else _get_saved_location(),
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV (opens in Excel)", "*.csv"), ("All files", "*.*")],
+        )
+        if not out_path:
+            return
+
+        try:
+            export_history_csv(entries, out_path)
+        except PermissionError:
+            messagebox.showerror("Export Failed",
+                                 "Could not write the file. If it is open in Excel, close it and try again.")
+            return
+        except Exception as e:
+            messagebox.showerror("Export Failed", f"Could not export history:\n{e}")
+            return
+
+        self._status_lbl.configure(text=f"✅  Exported {scope} to: {out_path}", fg=self.SUCCESS)
+        if messagebox.askyesno("Export Complete", f"Exported {scope} to:\n{out_path}\n\nOpen it now?"):
+            import subprocess, platform
+            if platform.system() == "Windows":
+                os.startfile(out_path)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", out_path])
+            else:
+                subprocess.run(["xdg-open", out_path])
+
+    def _invoice_to_receipt(self):
+        """Mark the selected invoice as paid and create its receipt with a new receipt number."""
+        import re
+        sel = self._hist_lb.curselection()
+        if not sel:
+            messagebox.showinfo("Select an Invoice",
+                                "Click an invoice in the history list first, then choose Mark Paid.")
+            return
+        inv = self._history_filtered[sel[0]]
+
+        if inv.get("doc_type") != "invoice":
+            messagebox.showinfo("Not an Invoice",
+                                "This record is already a receipt. Select an invoice instead.")
+            return
+
+        try:
+            exc   = float(inv.get("amount_exc", 0))
+            rate  = float(inv.get("vat_rate", 20))
+        except (TypeError, ValueError):
+            messagebox.showerror("Invalid Amount",
+                                 "This invoice has an unreadable amount. Load it into the form and generate the receipt manually.")
+            return
+        total = exc * (1 + rate / 100)
+
+        if inv.get("receipt_number"):
+            if not messagebox.askyesno(
+                    "Already Receipted",
+                    f"Invoice {inv.get('number')} already has receipt {inv['receipt_number']}.\n\n"
+                    "Create another receipt for it anyway?"):
+                return
+        elif not messagebox.askyesno(
+                "Mark Paid and Create Receipt",
+                f"Invoice:  {inv.get('number')}\n"
+                f"Client:   {inv.get('client_name', '')}\n"
+                f"Total:    £{total:.2f}\n\n"
+                "Mark this invoice as Paid and create a receipt dated today?"):
+            return
+
+        _day_fmt  = "%#d" if sys.platform == "win32" else "%-d"
+        today_str = datetime.today().strftime(f"{_day_fmt} %B %Y")
+        rec_number = _get_next_doc_number("receipt", today_str)
+
+        data = {
+            "client_name":    inv.get("client_name", ""),
+            "client_address": inv.get("client_address", ""),
+            "client_phone":   inv.get("client_phone", ""),
+            "client_email":   inv.get("client_email", ""),
+            "date":           today_str,
+            "number":         rec_number,
+            "description":    inv.get("description", ""),
+            "course_date":    inv.get("course_date", ""),
+            "amount_exc":     inv.get("amount_exc", ""),
+            "vat_rate":       inv.get("vat_rate", "20"),
+            "status":         "Paid",
+            "doc_type":       "receipt",
+        }
+
+        out_dir = self._out_dir.get()
+        if not os.path.isdir(out_dir):
+            out_dir = _get_saved_location()
+        out_path  = _pdf_path(out_dir, "receipt", rec_number, data["client_name"])
+
+        try:
+            generate_receipt(data, out_path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate receipt:\n{e}")
+            return
+
+        _save_history_entry({
+            "number":         rec_number,
+            "doc_type":       "receipt",
+            "date":           today_str,
+            "client_name":    data["client_name"],
+            "client_address": data["client_address"],
+            "client_phone":   data["client_phone"],
+            "client_email":   data["client_email"],
+            "description":    data["description"],
+            "course_date":    data["course_date"],
+            "amount_exc":     data["amount_exc"],
+            "vat_rate":       data["vat_rate"],
+            "status":         "Paid",
+            "from_invoice":   inv.get("number", ""),
+            "generated_at":   datetime.today().isoformat(timespec="seconds"),
+        })
+        _update_history_entry(inv, {
+            "status":         "Paid",
+            "receipt_number": rec_number,
+            "paid_on":        today_str,
+        })
+
+        self._refresh_doc_number()
+        self._refresh_history()
+        self._status_lbl.configure(
+            text=f"✅  {inv.get('number')} marked Paid. Receipt {rec_number} saved: {out_path}",
+            fg=self.SUCCESS)
+
+        if messagebox.askyesno("Receipt Created",
+                               f"Receipt {rec_number} saved to:\n{out_path}\n\nOpen it now?"):
+            import subprocess, platform
+            if platform.system() == "Windows":
+                os.startfile(out_path)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", out_path])
+            else:
+                subprocess.run(["xdg-open", out_path])
+
     def _load_from_history(self, event=None):
-        """Populate all form fields from the selected history entry."""
         sel = self._hist_lb.curselection()
         if not sel:
             return
         entry = self._history_filtered[sel[0]]
 
-        # Switch doc type
         self._doc_type.set(entry.get("doc_type", "invoice"))
 
-        # Helper to set a widget value
         def _set(widget, val):
             if isinstance(widget, tk.Text):
                 widget.delete("1.0", "end")
@@ -889,24 +1236,166 @@ class App(tk.Tk):
         _set(self.f_exc,     entry.get("amount_exc", ""))
         _set(self.f_vat,     entry.get("vat_rate", "20"))
 
-        # Set date to TODAY (not the original date)
         _day_fmt = "%#d" if sys.platform == "win32" else "%-d"
-        today_str = datetime.today().strftime(f"{_day_fmt} %B %Y")
-        _set(self.f_date, today_str)
+        _set(self.f_date, datetime.today().strftime(f"{_day_fmt} %B %Y"))
 
-        # Restore payment status
-        status = entry.get("status", "Payment Outstanding")
-        self._status_var.set(status)
-
-        # Refresh live total and doc number
+        self._status_var.set(entry.get("status", "Payment Outstanding"))
+        self._course_var.set("— select a course —")
         self._update_total()
         self._refresh_doc_number()
-
-        # Give user feedback
         self._status_lbl.configure(
-            text=f"✏️  Loaded: {entry.get('client_name','')} — edit if needed, then Generate",
+            text=f"✏️  Loaded: {entry.get('client_name', '')} — review then Generate",
             fg=self.DARK
         )
+
+    # ── Course library helpers ────────────────────────────────────────────────
+
+    def _refresh_course_combo(self):
+        courses = _load_courses()
+        names   = [c["name"] for c in courses] + ["＋ Add new course…"]
+        self._course_combo["values"] = names
+
+    def _on_course_selected(self, event=None):
+        val = self._course_var.get()
+        if val == "＋ Add new course…":
+            self._course_var.set("— select a course —")
+            self._open_course_manager()
+            return
+        match = next((c for c in _load_courses() if c["name"] == val), None)
+        if not match:
+            return
+        self.f_desc.delete("1.0", "end")
+        self.f_desc.insert("1.0", match["name"])
+        rate = float(match.get("vat_rate", 20))
+        exc  = float(match["price_inc"]) / (1 + rate / 100)
+        self.f_exc.delete(0, "end"); self.f_exc.insert(0, f"{exc:.2f}")
+        self.f_vat.delete(0, "end"); self.f_vat.insert(0, str(int(rate)))
+        self._update_total()
+
+    def _open_course_manager(self):
+        win = tk.Toplevel(self)
+        win.title("Course Library")
+        win.geometry("700x520")
+        win.configure(bg=self.BG)
+        win.grab_set()
+
+        tk.Label(win, text="Course Library", font=("Segoe UI", 13, "bold"),
+                 bg=self.BG, fg=self.DARK).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(win, text="Double-click a row to edit. Prices are inclusive of VAT.",
+                 font=self.FONT_SH, bg=self.BG, fg=self.MUTED).pack(anchor="w", padx=18, pady=(0, 8))
+
+        cols = ("name", "price_inc", "vat_rate")
+        tree_frame = tk.Frame(win, bg=self.BG)
+        tree_frame.pack(fill="both", expand=True, padx=18)
+
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=14)
+        tree.heading("name",      text="Course Name")
+        tree.heading("price_inc", text="Price (incl. VAT) £")
+        tree.heading("vat_rate",  text="VAT %")
+        tree.column("name",      width=420, anchor="w")
+        tree.column("price_inc", width=130, anchor="center")
+        tree.column("vat_rate",  width=70,  anchor="center")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+
+        def _reload_tree():
+            tree.delete(*tree.get_children())
+            for c in _load_courses():
+                tree.insert("", "end", values=(c["name"], f"{c['price_inc']:.2f}", c.get("vat_rate", 20)))
+
+        _reload_tree()
+
+        form = tk.Frame(win, bg=self.BG)
+        form.pack(fill="x", padx=18, pady=(10, 4))
+
+        tk.Label(form, text="Course Name:", font=self.FONT_SH,
+                 bg=self.BG, fg=self.MUTED).grid(row=0, column=0, sticky="w")
+        e_name = tk.Entry(form, font=self.FONT, bg=self.INP_BG, fg=self.INP_FG,
+                          relief="flat", bd=0,
+                          highlightthickness=1, highlightbackground=self.BORDER, width=44)
+        e_name.grid(row=0, column=1, padx=(8, 16), ipady=5, ipadx=6, sticky="ew")
+
+        tk.Label(form, text="Price (incl. VAT) £:", font=self.FONT_SH,
+                 bg=self.BG, fg=self.MUTED).grid(row=0, column=2, sticky="w")
+        e_price = tk.Entry(form, font=self.FONT, bg=self.INP_BG, fg=self.INP_FG,
+                           relief="flat", bd=0,
+                           highlightthickness=1, highlightbackground=self.BORDER, width=8)
+        e_price.grid(row=0, column=3, padx=(8, 16), ipady=5, ipadx=6)
+
+        tk.Label(form, text="VAT %:", font=self.FONT_SH,
+                 bg=self.BG, fg=self.MUTED).grid(row=0, column=4, sticky="w")
+        e_vat = tk.Entry(form, font=self.FONT, bg=self.INP_BG, fg=self.INP_FG,
+                         relief="flat", bd=0,
+                         highlightthickness=1, highlightbackground=self.BORDER, width=5)
+        e_vat.insert(0, "20")
+        e_vat.grid(row=0, column=5, padx=(8, 0), ipady=5, ipadx=6)
+
+        editing_index = [None]
+
+        def _on_double_click(event):
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0])["values"]
+            e_name.delete(0, "end");  e_name.insert(0, vals[0])
+            e_price.delete(0, "end"); e_price.insert(0, vals[1])
+            e_vat.delete(0, "end");   e_vat.insert(0, vals[2])
+            courses = _load_courses()
+            editing_index[0] = next(
+                (i for i, c in enumerate(courses) if c["name"] == vals[0]), None)
+
+        tree.bind("<Double-Button-1>", _on_double_click)
+
+        btn_row = tk.Frame(win, bg=self.BG)
+        btn_row.pack(fill="x", padx=18, pady=(4, 16))
+
+        def _save_entry():
+            name  = e_name.get().strip()
+            price = e_price.get().strip()
+            vat   = e_vat.get().strip()
+            if not name or not price:
+                messagebox.showerror("Missing", "Course name and price are required.", parent=win)
+                return
+            try:
+                price_f = float(price); vat_f = float(vat)
+            except ValueError:
+                messagebox.showerror("Invalid", "Price and VAT must be numbers.", parent=win)
+                return
+            courses = _load_courses()
+            entry   = {"name": name, "price_inc": price_f, "vat_rate": vat_f}
+            if editing_index[0] is not None:
+                courses[editing_index[0]] = entry
+                editing_index[0] = None
+            else:
+                courses.append(entry)
+            _save_courses(courses)
+            _reload_tree()
+            e_name.delete(0, "end"); e_price.delete(0, "end")
+            e_vat.delete(0, "end"); e_vat.insert(0, "20")
+            self._refresh_course_combo()
+
+        def _delete_entry():
+            sel = tree.selection()
+            if not sel:
+                return
+            vals    = tree.item(sel[0])["values"]
+            courses = [c for c in _load_courses() if c["name"] != vals[0]]
+            _save_courses(courses)
+            _reload_tree()
+            self._refresh_course_combo()
+
+        tk.Button(btn_row, text="💾  Save / Update", font=self.FONT_B,
+                  bg=self.ACCENT, fg="white", relief="flat", bd=0,
+                  cursor="hand2", padx=14, pady=7, command=_save_entry).pack(side="left")
+        tk.Button(btn_row, text="🗑  Delete Selected", font=self.FONT_B,
+                  bg="#FDECEA", fg=RED, relief="flat", bd=0,
+                  cursor="hand2", padx=14, pady=7, command=_delete_entry).pack(side="left", padx=(10, 0))
+        tk.Button(btn_row, text="✖  Close", font=self.FONT_B,
+                  bg=self.BORDER, fg=self.DARK, relief="flat", bd=0,
+                  cursor="hand2", padx=14, pady=7, command=win.destroy).pack(side="right")
 
     # ── Validation & generation ──────────────────────────────────────────────────
 
@@ -940,9 +1429,9 @@ class App(tk.Tk):
             return
 
         import re
-        doc_type    = self._doc_type.get()
+        doc_type     = self._doc_type.get()
         date_entered = self._get(self.f_date)
-        auto_number = _get_next_doc_number(doc_type, date_entered)
+        auto_number  = _get_next_doc_number(doc_type, date_entered)
         self._doc_num_var.set(auto_number)
 
         data = {
@@ -960,10 +1449,7 @@ class App(tk.Tk):
             "doc_type":       doc_type,
         }
 
-        name_safe = re.sub(r'[^\w\-]', '', data["client_name"].replace(" ", "_"))
-        doc_label = "invoice" if doc_type == "invoice" else "receipt"
-        filename  = f"{doc_label}_{name_safe}.pdf"
-        out_path  = os.path.join(self._out_dir.get(), filename)
+        out_path  = _pdf_path(self._out_dir.get(), doc_type, auto_number, data["client_name"])
 
         try:
             self._gen_btn.configure(text="⏳  Generating…", state="disabled")
@@ -976,12 +1462,12 @@ class App(tk.Tk):
             self._gen_btn.configure(text="⬇  Generate PDF", state="normal")
             self._status_lbl.configure(text=f"✅  Saved: {out_path}", fg=self.SUCCESS)
 
-            # Persist location, save to history, refresh preview
             _save_location(self._out_dir.get())
             _save_history_entry({
-                "number":      auto_number,
-                "doc_type":    doc_type,
-                "client_name": data["client_name"],
+                "number":         auto_number,
+                "doc_type":       doc_type,
+                "date":           data["date"],
+                "client_name":    data["client_name"],
                 "client_address": data["client_address"],
                 "client_phone":   data["client_phone"],
                 "client_email":   data["client_email"],
@@ -994,6 +1480,14 @@ class App(tk.Tk):
             })
             self._refresh_doc_number()
             self._refresh_history()
+
+            # Warn if history is getting full
+            total = len(_load_history())
+            if total >= WARN_HISTORY:
+                messagebox.showwarning(
+                    "History Nearly Full",
+                    f"You have {total} of {MAX_HISTORY} history entries saved.\nConsider exporting or clearing old records soon."
+                )
 
             if messagebox.askyesno("Done!", f"PDF saved to:\n{out_path}\n\nOpen it now?"):
                 import subprocess, platform
@@ -1009,5 +1503,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    _backup_settings_daily()
     app = App()
     app.mainloop()

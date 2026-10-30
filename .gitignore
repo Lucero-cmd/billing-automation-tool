@@ -1,0 +1,15 @@
+# Secrets and API files (never commit)
+credentials.json
+*token*.json
+.env
+
+# Local data
+fat_generator_settings.json
+fat_generator_backups/
+
+# Build output
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
