@@ -1,7 +1,8 @@
 #  Invoice & Receipt Generator
 
-A desktop app that generates professional PDF invoices and receipts, keeps a
-searchable history of every document, and exports that history for Excel.
+A modern desktop app that generates professional PDF invoices and receipts,
+tracks which invoices have been paid, and exports history for Excel.
+Built with Python, CustomTkinter and ReportLab.
 
 ---
 
@@ -29,17 +30,23 @@ python app.py
 
 ## Features
 
+- **Modern interface** with a sidebar, a New document page with a live
+  summary panel, and a History dashboard. The layout adapts to the window
+  size, so it still works when snapped to half the screen.
 - **Invoices and receipts** with automatic numbering (`FT-DDMMYY-NN` for
   invoices, `FAT-DDMMYY-NN` for receipts).
 - **Course library** with saved prices (inclusive of VAT) that fill in the
   amount and VAT rate automatically. Manage it from the course picker.
-- **Document history** of up to 5,000 records. Search by client, number,
-  type or course, and double-click a record to reload it into the form.
+- **History dashboard** of up to 5,000 records, with totals for outstanding
+  invoices and payments received this month. Search, filter by Outstanding,
+  Paid or Receipts, and double-click a record to reload it into the form.
 - **Mark Paid → Receipt.** Select an invoice in the history (or right-click it)
   to mark it as paid. The app creates a receipt dated today with its own
   receipt number and links the two records together.
-- **Export CSV.** Exports all history, or only the records matching the
-  current search, to a CSV file that opens in Excel.
+- **Export CSV by date range.** Pick From and To dates, or use the quick
+  buttons (this month, last month, this or last UK tax year). Optionally export
+  only the records matching the current search and filter. Exporting never
+  removes anything from your history.
 - **Daily backups** of the history file, keeping the last 30 days.
 
 ---
@@ -88,4 +95,4 @@ anything changes. The default course list is in `DEFAULT_COURSES`.
 - On some Linux distros you may need: `sudo apt install python3-tk`
 - The app works on Windows, macOS, and Linux.
 - To build a Windows `.exe`: `pip install pyinstaller`, then
-  `pyinstaller --onefile --windowed --add-data "logo.png;." app.py`
+  `pyinstaller --onefile --windowed --add-data "logo.png;." --collect-data customtkinter app.py`
