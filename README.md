@@ -94,5 +94,9 @@ anything changes. The default course list is in `DEFAULT_COURSES`.
 - `tkinter` is bundled with Python on Windows, so no extra install is needed.
 - On some Linux distros you may need: `sudo apt install python3-tk`
 - The app works on Windows, macOS, and Linux.
-- To build a Windows `.exe`: `pip install pyinstaller`, then
-  `pyinstaller --onefile --windowed --add-data "logo.png;." --collect-data customtkinter app.py`
+- To build a Windows app: `pip install pyinstaller`, then
+  `pyinstaller --windowed --add-data "logo.png;." --collect-data customtkinter app.py`.
+  This builds a folder (`dist/app/`) with the `.exe` inside. It starts much
+  faster than a `--onefile` build, which has to unpack itself on every launch.
+  Keep the whole folder together, and build it outside a synced folder such as
+  OneDrive if you can.
