@@ -605,6 +605,7 @@ def generate_receipt(data: dict, out_path: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 import customtkinter as ctk
+import functools
 from datetime import date, timedelta
 
 ctk.set_appearance_mode("light")
@@ -635,11 +636,16 @@ def _parse_user_date(text: str):
 
 def _entry_date(entry: dict):
     """The date a history record belongs to: its document date, else when it was generated."""
-    d = _parse_user_date(entry.get("date", ""))
+    return _cached_entry_date(str(entry.get("date", "")), str(entry.get("generated_at", "")))
+
+
+@functools.lru_cache(maxsize=20000)
+def _cached_entry_date(date_str: str, generated_at: str):
+    d = _parse_user_date(date_str)
     if d:
         return d
     try:
-        return datetime.fromisoformat(entry.get("generated_at", "")).date()
+        return datetime.fromisoformat(generated_at).date()
     except (TypeError, ValueError):
         return None
 
@@ -801,8 +807,6 @@ class App(ctk.CTk):
             for btn in btns:
                 btn.configure(fg_color=self.DARK2 if active else "transparent",
                               text_color="#FFFFFF" if active else "#C9CED8")
-        if name == "hist":
-            self._refresh_history()
 
     def _build_sidebar(self):
         bar = ctk.CTkFrame(self, width=232, fg_color=self.DARK, corner_radius=0)
@@ -885,7 +889,7 @@ class App(ctk.CTk):
             return
         if getattr(self, "_resize_job", None):
             self.after_cancel(self._resize_job)
-        self._resize_job = self.after(60, self._apply_layout)
+        self._resize_job = self.after(150, self._apply_layout)
 
     def _apply_layout(self):
         """Reflow the screens to fit the window, e.g. when snapped to half the screen."""
@@ -1138,7 +1142,7 @@ class App(ctk.CTk):
         datebox.grid_columnconfigure(0, weight=1)
         self.f_date = self._field(datebox, "Document date *", 0, 0)
         self._set(self.f_date, _today_str())
-        self.f_date.bind("<KeyRelease>", self._refresh_doc_number)
+        self.f_date.bind("<KeyRelease>", self._on_date_key)
         self.f_date.bind("<FocusOut>",   self._refresh_doc_number)
 
         totals = ctk.CTkFrame(s, fg_color="#F8F9FA", corner_radius=10)
@@ -1192,24 +1196,34 @@ class App(ctk.CTk):
         return page
 
     def _render_recent(self):
+        recent = self._history_all[:5]
+        sig = [(e.get("number"), e.get("generated_at"), e.get("status")) for e in recent]
+        if sig == getattr(self, "_recent_sig", None):
+            return
+        self._recent_sig = sig
         for w in self._recent_box.winfo_children():
             w.destroy()
-        recent = self._history_all[:5]
+        f, fb, fs = (self.FAMILY, 10), (self.FAMILY, 10, "bold"), (self.FAMILY, 9)
         if not recent:
-            ctk.CTkLabel(self._recent_box, text="No documents yet. Your history will appear here.",
-                         font=self.F_SM, text_color=self.MUTED, anchor="w").grid(row=0, column=0, sticky="w")
+            tk.Label(self._recent_box, text="No documents yet. Your history will appear here.",
+                     font=fs, fg=self.MUTED, bg=self.PANEL, anchor="w").grid(row=0, column=0, sticky="w")
             return
         for i, e in enumerate(recent):
-            ctk.CTkFrame(self._recent_box, height=1, fg_color="#EEF0F3").grid(
+            tk.Frame(self._recent_box, height=1, bg="#EEF0F3").grid(
                 row=i * 2, column=0, columnspan=4, sticky="ew")
             r = i * 2 + 1
-            ctk.CTkLabel(self._recent_box, text=e.get("number", ""), font=self.F_B,
-                         text_color=self.DARK, anchor="w", width=130).grid(row=r, column=0, sticky="w", pady=6)
-            ctk.CTkLabel(self._recent_box, text=e.get("client_name", ""), font=self.F,
-                         text_color="#3D4350", anchor="w").grid(row=r, column=1, sticky="w", padx=8)
-            ctk.CTkLabel(self._recent_box, text=f"£{_entry_total(e):,.2f}", font=self.F,
-                         text_color=self.DARK, anchor="e", width=80).grid(row=r, column=2, sticky="e", padx=8)
-            self._pill(self._recent_box, e.get("status", "")).grid(row=r, column=3, sticky="e")
+            tk.Label(self._recent_box, text=e.get("number", ""), font=fb, fg=self.DARK,
+                     bg=self.PANEL, anchor="w", width=15).grid(row=r, column=0, sticky="w", pady=7)
+            tk.Label(self._recent_box, text=e.get("client_name", ""), font=f, fg="#3D4350",
+                     bg=self.PANEL, anchor="w").grid(row=r, column=1, sticky="w", padx=8)
+            tk.Label(self._recent_box, text=f"£{_entry_total(e):,.2f}", font=f, fg=self.DARK,
+                     bg=self.PANEL, anchor="e").grid(row=r, column=2, sticky="e", padx=8)
+            status = e.get("status", "")
+            key = ("Paid" if status == "Paid"
+                   else "Outstanding" if status in OUTSTANDING_STATUSES else "Other")
+            bg, fg = self.PILL[key]
+            tk.Label(self._recent_box, text="Outstanding" if status == "Payment Outstanding" else status,
+                     font=fs, fg=fg, bg=bg, padx=8, pady=2).grid(row=r, column=3, sticky="e")
 
     # ── History page (layout B) ──────────────────────────────────────────────
 
@@ -1256,7 +1270,7 @@ class App(ctk.CTk):
                                          border_color=self.FIELD_BD, text_color=self.INP_FG,
                                          placeholder_text="Search client, number or course")
         self._hist_search.grid(row=0, column=0, sticky="ew")
-        self._hist_search.bind("<KeyRelease>", lambda *_: self._apply_history_filter())
+        self._hist_search.bind("<KeyRelease>", self._on_search_key)
         self._filter_seg = ctk.CTkSegmentedButton(
             bar, values=["All", "Outstanding", "Paid", "Receipts"], height=38, font=self.F,
             corner_radius=10, fg_color="#E6E8EC", selected_color="#FFFFFF",
@@ -1396,7 +1410,13 @@ class App(ctk.CTk):
         self._render_recent()
         self._apply_history_filter()
 
+    def _on_search_key(self, _event=None):
+        if getattr(self, "_search_job", None):
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(220, self._apply_history_filter)
+
     def _apply_history_filter(self):
+        self._search_job = None
         self._history_filtered = self._filter_entries(
             self._history_all, self._hist_search.get(), self._hist_filter.get())
         self._tree.delete(*self._tree.get_children())
@@ -1607,7 +1627,13 @@ class App(ctk.CTk):
             date_str = datetime.today().strftime("%d %B %Y")
         return _preview_doc_number(self._doc_type.get(), date_str)
 
+    def _on_date_key(self, _event=None):
+        if getattr(self, "_date_job", None):
+            self.after_cancel(self._date_job)
+        self._date_job = self.after(250, self._refresh_doc_number)
+
     def _refresh_doc_number(self, *_):
+        self._date_job = None
         self._doc_num_var.set(self._default_number())
 
     def _clear_form(self):
